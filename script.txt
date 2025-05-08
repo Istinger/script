@@ -1,0 +1,86 @@
+#!/bin/bash
+
+# Comprobación de argumento
+if [ -z "$1" ]; then
+    echo "Uso: $0 <número_usuario>"
+    exit 1
+fi
+
+USER_NUM=$1
+USERNAME="usuario$USER_NUM"
+DB_NAME="${USERNAME}_db"
+DB_USER="${USERNAME}"
+PASSWORD=$(openssl rand -base64 12)
+USER_HOME="/home/$USERNAME"
+USER_PUBLIC_HTML="$USER_HOME/public_html"
+
+echo "➤ Creando usuario del sistema: $USERNAME"
+sudo useradd -m -s /bin/bash "$USERNAME"
+
+echo "➤ Creando directorio public_html"
+sudo mkdir -p "$USER_PUBLIC_HTML"
+
+echo "➤ Creando archivo index.html de bienvenida"
+echo "<html><body><h1>Hola, $USERNAME</h1></body></html>" | sudo tee "$USER_PUBLIC_HTML/index.html" > /dev/null
+
+echo "➤ Asignando permisos necesarios"
+# Permisos para acceso web (www-data/nginx)
+sudo chmod o+x /home
+sudo chmod o+x "$USER_HOME"                         # permite que nginx entre a la carpeta
+sudo chmod o+rx "$USER_PUBLIC_HTML"                # lectura y ejecución para nginx
+sudo chmod 644 "$USER_PUBLIC_HTML/index.html"      # lectura para todos
+sudo chown -R "$USERNAME:$USERNAME" "$USER_PUBLIC_HTML"  # Propiedad
+
+# (Opcional: asegurar que home tiene permisos correctos)
+sudo chmod 755 "$USER_HOME"
+
+echo "➤ Generando archivo de credenciales"
+CRED_FILE="$USER_PUBLIC_HTML/credenciales.txt"
+sudo tee "$CRED_FILE" > /dev/null <<EOF
+Credenciales para el hosting de $USERNAME:
+
+Usuario del sistema: $USERNAME
+Contraseña (FTP y DB): $PASSWORD
+
+Base de Datos: $DB_NAME
+Usuario DB: $DB_USER
+
+Accede a phpMyAdmin para administrar tu base de datos.
+EOF
+
+sudo chown "$USERNAME:$USERNAME" "$CRED_FILE"
+sudo chmod 600 "$CRED_FILE"
+
+echo "➤ Creando base de datos MySQL y usuario"
+sudo mysql -u root -p123 <<EOF
+CREATE DATABASE $DB_NAME;
+CREATE USER '$DB_USER'@'localhost' IDENTIFIED BY '$PASSWORD';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+
+echo "➤ Configurando contraseña del sistema para acceso SSH/SFTP"
+echo "$USERNAME:$PASSWORD" | sudo chpasswd
+
+echo "➤ Verificando configuración de Nginx para userdirs..."
+USERDIRS_CONF="/etc/nginx/sites-available/userdirs"
+if [ ! -f "$USERDIRS_CONF" ]; then
+    echo "➤ Creando bloque userdirs en Nginx..."
+    sudo tee "$USERDIRS_CONF" > /dev/null <<EOF
+server {
+    listen 8023;
+    server_name localhost;
+
+    location ~ ^/~(\w+)(/.*)?\$ {
+        alias /home/\$1/public_html\$2;
+        index index.html;
+        autoindex on;
+    }
+}
+EOF
+    sudo ln -s "$USERDIRS_CONF" /etc/nginx/sites-enabled/
+    sudo nginx -t && sudo systemctl reload nginx
+fi
+
+echo "✅ Usuario $USERNAME configurado exitosamente."
+echo "🌐 URL de prueba: http://tu-ip:8023/~$USERNAME"
